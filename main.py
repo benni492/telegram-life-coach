@@ -1,129 +1,111 @@
 import os
+import json
 import time
-import psycopg2
+import threading
+from datetime import datetime
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
 from openai import OpenAI
 
-# =====================
-# ENV
-# =====================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
-DATABASE_URL = os.getenv("DATABASE_URL")
 
 client = OpenAI(api_key=OPENAI_KEY)
 
-# =====================
-# DATABASE (robust)
-# =====================
-def get_db():
-    return psycopg2.connect(
-        DATABASE_URL,
-        sslmode="require"
-    )
+MEMORY_FILE = "/app/memory.json"
 
-def init_db():
-    for _ in range(10):  # Retry bis DB bereit ist
-        try:
-            conn = get_db()
-            cur = conn.cursor()
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS memory (
-                    key TEXT,
-                    value TEXT
-                )
-            """)
-            conn.commit()
-            cur.close()
-            conn.close()
-            return
-        except Exception:
-            time.sleep(2)
-    raise RuntimeError("DB nicht erreichbar")
+def load_data():
+    if not os.path.exists(MEMORY_FILE):
+        return {
+            "profile": {
+                "ziele": [],
+                "probleme": [],
+                "coach_stil": []
+            },
+            "chat_id": None,
+            "last_morning": None,
+            "last_evening": None
+        }
+    with open(MEMORY_FILE, "r") as f:
+        return json.load(f)
 
-def get_memory():
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("SELECT key, value FROM memory")
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
+def save_data(data):
+    with open(MEMORY_FILE, "w") as f:
+        json.dump(data, f, indent=2)
 
-    memory = {
-        "ziele": [],
-        "probleme": [],
-        "coach_stil": [],
-        "wichtige_infos": []
-    }
-
-    for k, v in rows:
-        if k in memory:
-            memory[k].append(v)
-
-    return memory
-
-def save_memory(key, value):
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO memory (key, value) VALUES (%s, %s)",
-        (key, value)
-    )
-    conn.commit()
-    cur.close()
-    conn.close()
-
-# =====================
-# MESSAGE HANDLER
-# =====================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_message = update.message.text
-    lower = user_message.lower()
+    data = load_data()
+    msg = update.message.text
+    lower = msg.lower()
 
-    if "sidehustle" in lower or "ziel" in lower or "ki" in lower:
-        save_memory("ziele", user_message)
+    data["chat_id"] = update.message.chat_id
 
-    if "schwer" in lower or "anfangen" in lower or "problem" in lower:
-        save_memory("probleme", user_message)
+    if "sidehustle" in lower or "ki" in lower:
+        if msg not in data["profile"]["ziele"]:
+            data["profile"]["ziele"].append(msg)
 
-    if "sei" in lower and ("direkt" in lower or "streng" in lower):
-        save_memory("coach_stil", user_message)
+    if "anfangen" in lower or "schwer" in lower:
+        if msg not in data["profile"]["probleme"]:
+            data["profile"]["probleme"].append(msg)
 
-    memory = get_memory()
+    if "sei" in lower:
+        if msg not in data["profile"]["coach_stil"]:
+            data["profile"]["coach_stil"].append(msg)
+
+    save_data(data)
 
     system_message = f"""
 Du bist mein persönlicher Lebenscoach.
 
-WICHTIGE INFOS ÜBER MICH:
-Ziele: {memory["ziele"]}
-Probleme: {memory["probleme"]}
-Coach-Stil: {memory["coach_stil"]}
+Profil:
+Ziele: {data["profile"]["ziele"]}
+Probleme: {data["profile"]["probleme"]}
+Coach-Stil: {data["profile"]["coach_stil"]}
 
-Dein Stil:
-- ehrlich
-- direkt
-- handlungsorientiert
-- zwing mich zu konkreten Aktionen
+Sei ehrlich, direkt und zwing mich zu konkreten Aktionen.
 """
 
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
             {"role": "system", "content": system_message},
-            {"role": "user", "content": user_message}
+            {"role": "user", "content": msg}
         ]
     )
 
     await update.message.reply_text(response.choices[0].message.content)
 
-# =====================
-# START BOT
-# =====================
-init_db()
+def push_loop(app):
+    while True:
+        data = load_data()
+        now = datetime.now()
+        today = now.date().isoformat()
+
+        if data["chat_id"]:
+            # MORGEN 08:00
+            if now.hour == 8 and data["last_morning"] != today:
+                app.bot.send_message(
+                    chat_id=data["chat_id"],
+                    text="🌅 Was ist heute die EINE konkrete Aktion, die dich deinem Sidehustle oder KI-Ziel näherbringt?"
+                )
+                data["last_morning"] = today
+                save_data(data)
+
+            # ABEND 21:30
+            if now.hour == 21 and now.minute >= 30 and data["last_evening"] != today:
+                app.bot.send_message(
+                    chat_id=data["chat_id"],
+                    text="🌙 Was hast du heute konkret getan? Wenn nichts: warum?"
+                )
+                data["last_evening"] = today
+                save_data(data)
+
+        time.sleep(30)
 
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-print("🤖 Coach läuft stabil mit DB")
+threading.Thread(target=push_loop, args=(app,), daemon=True).start()
+
+print("🤖 Coach läuft + schreibt dich aktiv an")
 app.run_polling()
