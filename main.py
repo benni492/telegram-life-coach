@@ -1,5 +1,4 @@
 import os
-import asyncio
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
 from openai import OpenAI
@@ -29,12 +28,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(response.choices[0].message.content)
 
-async def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+# 👇 KEIN asyncio.run(), KEIN async main()
+app = ApplicationBuilder().token(BOT_TOKEN).build()
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print("🤖 Telegram-Life-Coach läuft und lauscht …")
-    await app.run_polling()
-
-if __name__ == "__main__":
-    asyncio.run(main())
+print("🤖 Telegram-Life-Coach läuft stabil …")
+app.run_polling()
