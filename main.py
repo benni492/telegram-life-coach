@@ -10,9 +10,6 @@ from telegram.ext import (
 from openai import OpenAI
 from datetime import time
 
-# =====================
-# ENV
-# =====================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 
@@ -21,7 +18,7 @@ client = OpenAI(api_key=OPENAI_KEY)
 MEMORY_FILE = "/app/memory.json"
 
 # =====================
-# MEMORY
+# MEMORY (ROBUST)
 # =====================
 def load_data():
     if not os.path.exists(MEMORY_FILE):
@@ -33,8 +30,22 @@ def load_data():
             },
             "chat_id": None
         }
+
     with open(MEMORY_FILE, "r") as f:
-        return json.load(f)
+        data = json.load(f)
+
+    # 🔑 ABSOLUT KRITISCHER FIX
+    if "profile" not in data:
+        data["profile"] = {
+            "ziele": [],
+            "probleme": [],
+            "coach_stil": []
+        }
+
+    if "chat_id" not in data:
+        data["chat_id"] = None
+
+    return data
 
 def save_data(data):
     with open(MEMORY_FILE, "w") as f:
@@ -48,7 +59,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message.text
     lower = msg.lower()
 
-    # Chat-ID merken (für Push)
+    # Chat-ID merken
     data["chat_id"] = update.message.chat_id
 
     # Profil-Gedächtnis
@@ -88,7 +99,7 @@ Sei ehrlich, direkt und zwing mich zu EINER konkreten Aktion.
     await update.message.reply_text(response.choices[0].message.content)
 
 # =====================
-# PUSH JOBS
+# PUSH JOBS (STABIL)
 # =====================
 async def morning_push(context: ContextTypes.DEFAULT_TYPE):
     data = load_data()
@@ -110,13 +121,11 @@ async def evening_push(context: ContextTypes.DEFAULT_TYPE):
 # START BOT
 # =====================
 app = ApplicationBuilder().token(BOT_TOKEN).build()
-
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-# JobQueue (STABIL)
 job_queue = app.job_queue
 job_queue.run_daily(morning_push, time=time(hour=8, minute=0))
 job_queue.run_daily(evening_push, time=time(hour=21, minute=30))
 
-print("🤖 Coach läuft stabil + schreibt dich aktiv an")
+print("🤖 Coach läuft stabil + Gedächtnis + Push")
 app.run_polling()
