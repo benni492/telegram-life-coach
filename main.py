@@ -1,12 +1,18 @@
 import os
 import json
-import time
-import threading
-from datetime import datetime
 from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
+from telegram.ext import (
+    ApplicationBuilder,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
 from openai import OpenAI
+from datetime import time
 
+# =====================
+# ENV
+# =====================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 
@@ -14,6 +20,9 @@ client = OpenAI(api_key=OPENAI_KEY)
 
 MEMORY_FILE = "/app/memory.json"
 
+# =====================
+# MEMORY
+# =====================
 def load_data():
     if not os.path.exists(MEMORY_FILE):
         return {
@@ -22,9 +31,7 @@ def load_data():
                 "probleme": [],
                 "coach_stil": []
             },
-            "chat_id": None,
-            "last_morning": None,
-            "last_evening": None
+            "chat_id": None
         }
     with open(MEMORY_FILE, "r") as f:
         return json.load(f)
@@ -33,13 +40,18 @@ def save_data(data):
     with open(MEMORY_FILE, "w") as f:
         json.dump(data, f, indent=2)
 
+# =====================
+# MESSAGE HANDLER
+# =====================
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = load_data()
     msg = update.message.text
     lower = msg.lower()
 
+    # Chat-ID merken (für Push)
     data["chat_id"] = update.message.chat_id
 
+    # Profil-Gedächtnis
     if "sidehustle" in lower or "ki" in lower:
         if msg not in data["profile"]["ziele"]:
             data["profile"]["ziele"].append(msg)
@@ -62,7 +74,7 @@ Ziele: {data["profile"]["ziele"]}
 Probleme: {data["profile"]["probleme"]}
 Coach-Stil: {data["profile"]["coach_stil"]}
 
-Sei ehrlich, direkt und zwing mich zu konkreten Aktionen.
+Sei ehrlich, direkt und zwing mich zu EINER konkreten Aktion.
 """
 
     response = client.chat.completions.create(
@@ -75,37 +87,36 @@ Sei ehrlich, direkt und zwing mich zu konkreten Aktionen.
 
     await update.message.reply_text(response.choices[0].message.content)
 
-def push_loop(app):
-    while True:
-        data = load_data()
-        now = datetime.now()
-        today = now.date().isoformat()
+# =====================
+# PUSH JOBS
+# =====================
+async def morning_push(context: ContextTypes.DEFAULT_TYPE):
+    data = load_data()
+    if data["chat_id"]:
+        await context.bot.send_message(
+            chat_id=data["chat_id"],
+            text="🌅 Was ist heute die *eine konkrete Aktion*, die dich deinem KI-Sidehustle näherbringt?"
+        )
 
-        if data["chat_id"]:
-            # MORGEN 08:00
-            if now.hour == 8 and data["last_morning"] != today:
-                app.bot.send_message(
-                    chat_id=data["chat_id"],
-                    text="🌅 Was ist heute die EINE konkrete Aktion, die dich deinem Sidehustle oder KI-Ziel näherbringt?"
-                )
-                data["last_morning"] = today
-                save_data(data)
+async def evening_push(context: ContextTypes.DEFAULT_TYPE):
+    data = load_data()
+    if data["chat_id"]:
+        await context.bot.send_message(
+            chat_id=data["chat_id"],
+            text="🌙 Was hast du heute konkret getan? Wenn nichts: warum?"
+        )
 
-            # ABEND 21:30
-            if now.hour == 21 and now.minute >= 30 and data["last_evening"] != today:
-                app.bot.send_message(
-                    chat_id=data["chat_id"],
-                    text="🌙 Was hast du heute konkret getan? Wenn nichts: warum?"
-                )
-                data["last_evening"] = today
-                save_data(data)
-
-        time.sleep(30)
-
+# =====================
+# START BOT
+# =====================
 app = ApplicationBuilder().token(BOT_TOKEN).build()
+
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-threading.Thread(target=push_loop, args=(app,), daemon=True).start()
+# JobQueue (STABIL)
+job_queue = app.job_queue
+job_queue.run_daily(morning_push, time=time(hour=8, minute=0))
+job_queue.run_daily(evening_push, time=time(hour=21, minute=30))
 
-print("🤖 Coach läuft + schreibt dich aktiv an")
+print("🤖 Coach läuft stabil + schreibt dich aktiv an")
 app.run_polling()
