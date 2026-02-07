@@ -1,4 +1,5 @@
 import os
+import time
 import psycopg2
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
@@ -14,23 +15,32 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 client = OpenAI(api_key=OPENAI_KEY)
 
 # =====================
-# DATABASE
+# DATABASE (robust)
 # =====================
 def get_db():
-    return psycopg2.connect(DATABASE_URL)
+    return psycopg2.connect(
+        DATABASE_URL,
+        sslmode="require"
+    )
 
 def init_db():
-    conn = get_db()
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS memory (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )
-    """)
-    conn.commit()
-    cur.close()
-    conn.close()
+    for _ in range(10):  # Retry bis DB bereit ist
+        try:
+            conn = get_db()
+            cur = conn.cursor()
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS memory (
+                    key TEXT,
+                    value TEXT
+                )
+            """)
+            conn.commit()
+            cur.close()
+            conn.close()
+            return
+        except Exception:
+            time.sleep(2)
+    raise RuntimeError("DB nicht erreichbar")
 
 def get_memory():
     conn = get_db()
@@ -48,18 +58,18 @@ def get_memory():
     }
 
     for k, v in rows:
-        memory[k].append(v)
+        if k in memory:
+            memory[k].append(v)
 
     return memory
 
 def save_memory(key, value):
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO memory (key, value)
-        VALUES (%s, %s)
-        ON CONFLICT DO NOTHING
-    """, (key, value))
+    cur.execute(
+        "INSERT INTO memory (key, value) VALUES (%s, %s)",
+        (key, value)
+    )
     conn.commit()
     cur.close()
     conn.close()
@@ -71,14 +81,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_message = update.message.text
     lower = user_message.lower()
 
-    # Gedächtnis speichern
     if "sidehustle" in lower or "ziel" in lower or "ki" in lower:
         save_memory("ziele", user_message)
 
-    if "schwer" in lower or "problem" in lower or "anfangen" in lower:
+    if "schwer" in lower or "anfangen" in lower or "problem" in lower:
         save_memory("probleme", user_message)
 
-    if "sei" in lower and ("direkt" in lower or "streng" in lower or "nett" in lower):
+    if "sei" in lower and ("direkt" in lower or "streng" in lower):
         save_memory("coach_stil", user_message)
 
     memory = get_memory()
@@ -90,15 +99,12 @@ WICHTIGE INFOS ÜBER MICH:
 Ziele: {memory["ziele"]}
 Probleme: {memory["probleme"]}
 Coach-Stil: {memory["coach_stil"]}
-Sonstiges: {memory["wichtige_infos"]}
 
 Dein Stil:
 - ehrlich
 - direkt
 - handlungsorientiert
-- nicht nett bei Ausreden
-
-Wenn ich zögere, zwing mich zu EINER konkreten Aktion.
+- zwing mich zu konkreten Aktionen
 """
 
     response = client.chat.completions.create(
@@ -119,5 +125,5 @@ init_db()
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-print("🤖 Coach läuft mit dauerhaftem Gedächtnis (DB)")
+print("🤖 Coach läuft stabil mit DB")
 app.run_polling()
